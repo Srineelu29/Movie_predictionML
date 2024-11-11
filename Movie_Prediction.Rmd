@@ -1,0 +1,345 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Loading Libraries
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(jsonlite)
+```
+
+## Load Data
+
+```{r}
+ MovieData <- read.csv('movies_metadata original.csv')
+ # Some numeric data fields are stored as characters, so this must be changed
+ str(MovieData)
+```
+
+## Data Analysis and Preprocesing
+
+Convert Data columns to numeric
+
+Modify Genres and production column from json string to single string specifying Genre and production house
+
+```{r}
+MovieData$popularity <- as.numeric(MovieData$popularity)
+MovieData$vote_count <- as.numeric(MovieData$vote_count)
+MovieData$runtime <- as.numeric(MovieData$runtime)
+MovieData$budget <- as.numeric(MovieData$budget)
+```
+
+```{r}
+MovieData <- unite(MovieData, title_tagline, original_title, tagline, sep = " - ")
+MovieData <- select(MovieData, -"adult",-"id",-"imdb_id",-"original_language", -"overview", -"status",-"title", -"video", -"spoken_languages") %>%
+   mutate(net_return = revenue - budget, ROI = net_return / budget * 100)
+```
+
+```{r}
+MovieData$genres <- lapply(MovieData$genres, function(x) gsub(".*name.: '(.*)'.*","\\1",x))
+MovieData$production_countries <- lapply(MovieData$production_countries, function(x) gsub(".*name.: '(.*)'.*","\\1",x))
+MovieData$production_companies <- lapply(MovieData$production_companies, function(x) gsub(".*name.: '(.*)'.*","\\1",x))
+
+```
+
+```{r}
+MovieData$release_date <- substr(MovieData$release_date, nchar(as.character(MovieData$release_date))-3, nchar(as.character(MovieData$release_date)))
+MovieData$release_date <- as.numeric(MovieData$release_date)
+
+```
+
+```{r}
+library(ggplot2)
+MovieData %>% 
+  unnest(genres) %>% 
+  group_by(genres) %>% 
+  summarise(revenue = sum(revenue)) %>% 
+  ggplot(aes(x = genres, y = revenue)) +
+  geom_bar(stat = "identity",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Genres", y = "Revenue", title = "Revenue by Genres")
+
+```
+
+```{r}
+MovieData %>% 
+  unnest(release_date) %>% 
+  group_by(release_date) %>% 
+  summarise(revenue = sum(revenue)) %>% 
+  ggplot(aes(x = release_date, y = revenue)) +
+  geom_bar(stat = "identity",fill = "red") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "release_date", y = "Revenue", title = "Revenue by every year")
+```
+
+```{r}
+library(tm)
+dtm <- DocumentTermMatrix(MovieData$tagline_title)
+dtm
+```
+
+```{r}
+glimpse(MovieData)
+```
+
+Converting Production column to binary 1 for US Production house else foreign
+
+```{r}
+MovieData$production_countries <- as.character(MovieData$production_countries)
+MovieData$production_countries <- ifelse(MovieData$production_countries == "United States of America", 1, 0)
+```
+
+selecting the columns that has only numerical values
+
+```{r}
+MovieData_n <- MovieData[,c(1,4,7,8,9,10,11)]
+```
+
+```{r}
+MovieData_n <- MovieData_n[c("budget","popularity","release_date","runtime","vote_average","vote_count","revenue")]
+```
+
+```{r}
+names(MovieData_n)
+
+```
+
+```{r}
+# number of missing values in each column
+colSums(is.na(MovieData_n))
+# removing Missing values
+MovieData_n <- na.omit(MovieData_n)
+```
+
+## Split data into Train and Test sets
+
+```{r}
+# split the data into training and testing data
+set.seed(123)
+train_sample <- sample(1:nrow(MovieData_n), 0.7*nrow(MovieData_n))
+train_data <- MovieData_n[train_sample,]
+test_data <- MovieData_n[-train_sample,]
+```
+
+## Linear Regression Model
+
+```{r}
+library(lattice)
+library(ggplot2)
+library(caret)
+# Linear regression model
+lm_model <- train(revenue ~ ., data = train_data, method = "lm", trControl = trainControl(method = "cv", number = 10))
+
+# measure the model preformence
+lm_pred <- predict(lm_model, test_data)
+lm_mse <- sqrt(mean((test_data$revenue - lm_pred)^2))
+lm_mse
+```
+
+```{r}
+summary(lm_model)
+```
+
+## Logistic Regression
+
+```{r}
+log_model<- train(revenue ~ ., data = train_data, method = "glm", trControl = trainControl(method = "cv", number = 10))
+
+# measure the model preformence
+log_pred <- predict(log_model, test_data)
+log_mse <- mean((test_data$revenue - log_pred)^2)
+log_mse <- sqrt(log_mse)
+log_mse
+```
+
+```{r}
+summary(log_model)
+```
+
+## SVM - Linear
+
+```{r}
+library(e1071)
+model_svm <- train(revenue ~ ., data = train_data, method = "svmLinear", trControl = trainControl(method = "cv", number = 10))
+# measure the model preformence
+pred_svm <- predict(model_svm, test_data)
+mse_svm <- mean((test_data$revenue - pred_svm)^2)
+mse_svm
+```
+
+```{r}
+summary(model_svm)
+```
+
+## SVM - Radial
+
+```{r}
+model_svmr <- train(revenue ~ ., data = train_data, method = "svmRadial", trControl = trainControl(method = "cv", number = 10))
+# measure the model preformence
+pred_svmr <- predict(model_svmr, test_data)
+mse_svmr <- mean((test_data$revenue - pred_svmr)^2)
+mse_svmr
+```
+
+```{r}
+summary(model_svmr)
+```
+
+## XGBoost
+
+```{r}
+model_xg <- train(revenue ~ ., data = train_data, method = "xgbTree", trControl = trainControl(method = "cv", number = 10))
+# measure the model preformence
+pred_xg <- predict(model_xg, test_data)
+mse_xg <- mean((test_data$revenue - pred_xg)^2)
+mse_xg
+```
+
+```{r}
+model_xg
+```
+
+## Random Forest
+
+```{r}
+model_forest <-train(revenue ~ ., data = train_data, method = "rf", trControl = trainControl(method = "cv", number = 10))
+# measure the model preformence
+pred_forest <- predict(model_forest, test_data)
+mse_forest <- mean((test_data$revenue - pred_forest)^2)
+mse_forest
+
+```
+
+```{r}
+summary(model_forest)
+```
+
+## Decision Tree
+
+```{r}
+
+#fit for decision tree model to predict revenue based on the budget, popularity, production_countries, runtime, vote_average, vote_count
+model_tree <- train(revenue ~ ., data = train_data, method = "rpart", trControl = trainControl(method = "cv", number = 10))
+# measure the model preformence
+pred_tree <- predict(model_tree, test_data)
+mse_tree <- sqrt(mean((test_data$revenue - pred_tree)^2))
+mse_tree
+```
+
+```{r}
+summary(model_tree)
+```
+
+### Split Training set into Train and Validation
+
+```{r}
+train_val_sample <- sample(1:nrow(train_data), 0.7*nrow(train_data))
+train_data1 <- train_data[train_val_sample,]
+val_data <- train_data[-train_val_sample,]
+```
+
+## Neural Networks
+
+```{r}
+library(tensorflow)
+library(keras,warn.conflicts = FALSE)
+```
+
+```{r}
+model <- keras_model_sequential() %>% 
+  layer_dense(units = 10, activation = "relu", input_shape = 6) %>% 
+  layer_dense(units = 15, activation = "relu")
+  layer_dense(units = 1, activation = "sigmoid")
+# compile the model with adam optimizer and mean square error loss function
+model %>% compile(
+  loss = "mean_squared_error",
+  optimizer = "adam",
+  metrics = "accuracy"
+)
+```
+
+```{r}
+history <- model %>% fit(
+  as.matrix(train_data1[,1:6]), as.matrix(train_data1[,7]),
+  epochs = 10,
+  batch_size = 10,
+  validation_data = list(as.matrix(val_data[,1:6]), as.matrix(val_data[,7])),
+  verbose = 1
+)   
+
+model %>% evaluate( as.matrix(test_data[,1:6]),  as.matrix(test_data[,7]))
+
+# measure the model preformence
+pred <- predict(model, as.matrix(test_data[,1:6]))
+mse_nn1 <- sqrt(mean((test_data$revenue - pred)^2))
+mse_nn1
+```
+
+```{r}
+plot(history)
+```
+
+```{r}
+library(keras)
+library(tfruns)
+library(reticulate)
+flags <- list(
+  learning_rate=c(0.1,0.5,0.01),
+                 units1=c(8, 16, 32),
+                 units2=c(8, 16,32),
+                 dropout=c(0.1, 0.3, 0.5),
+                 batch_size=c(8, 16, 32) 
+)
+runs <- tuning_run('MovieData_Rev.R', sample = 0.01, flags = flags)
+```
+
+```{r}
+training_run("MovieData_Rev.R")
+```
+
+### Neural Networks II
+
+```{r}
+model2 <- keras_model_sequential() %>% 
+  layer_dense(units = 16, activation = "relu", input_shape = 6) %>% 
+  layer_dense(units = 32, activation = "relu")
+  layer_dense(units = 1, activation = "sigmoid")
+# compile the model with adam optimizer and mean square error loss function
+model2 %>% compile(
+  loss = "mean_squared_error",
+  optimizer = "adam",
+  metrics = "accuracy"
+)
+```
+
+```{r}
+history2 <- model2 %>% fit(
+  as.matrix(train_data[,1:6]), as.matrix(train_data[,7]),
+  epochs = 500,
+  batch_size = 16,
+  validation_split = 0.2,
+  verbose = 1
+)   
+
+model2 %>% evaluate( as.matrix(test_data[,1:6]),  as.matrix(test_data[,7]))
+
+# measure the model preformence
+pred2 <- predict(model2, as.matrix(test_data[,1:6]))
+mse_nn2 <- sqrt(mean((test_data$revenue - pred2)^2))
+mse_nn2
+```
+
+```{r}
+plot(history2)
+```
+
+## Summary of all the Models
+
+```{r}
+Movie_rev <- data.frame("Model" = c("Linear_reg","Log_reg","Decision Tree","SVM-Linear","SVM-Radial","XGBoost", "NN1","NN2"), "RMSE" = c( lm_mse ,log_mse, mse_svm,mse_svmr, mse_xg,mse_forest,mse_nn1,mse_nn2))
+
+Movie_rev
+```

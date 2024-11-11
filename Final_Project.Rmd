@@ -1,0 +1,673 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Predicting Box office performance of Movies
+
+
+```{r}
+# Load all packages here.
+library(ggcorrplot)
+library(lattice)
+library(glmnet)
+library(mltools)
+library(data.table)
+library(keras)
+library(tfruns)
+library(tidyr)
+library(GGally)
+library(purrr)
+library(knitr)
+library(scales)
+library(psych)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(corrplot)
+library(DescTools)
+library(qdap)
+library(gmodels)
+library(Matrix)
+library(tensorflow)
+library(kableExtra)
+```
+
+## Data Exploration and Pre-Processing
+
+Load the movies dataset
+
+```{r}
+movies <- read.csv("movies_metadata original.csv", na.strings=c("", '#N/A', '[]', '0'))
+movies
+```
+
+```{r}
+str(movies)
+```
+
+```{r}
+movies$budget <- as.integer(movies$budget)
+```
+
+```{r}
+movies$genres[1]
+movies$overview[1]
+movies$production_companies[1]
+movies$production_countries[1]
+movies$spoken_languages[1]
+movies$tagline[1]
+```
+
+```{r}
+colSums(is.na(movies))
+```
+
+Some of the columns are in in json format and the relevent info need to be extracted from it.
+
+```{r}
+# Remove unnecessary characters from genres column
+movies$genres <- gsub("\\[\\{|\\}\\]", "", movies$genres)  # Remove [ and ] characters
+movies$genres <- gsub("'id':\\s\\d+,\\s|'name':\\s|'|\\{|\\}", "", movies$genres)  # Remove unnecessary text
+
+movies$genres[1]
+```
+
+```{r}
+# Remove unnecessary characters from production_companies column
+movies$production_companies <- gsub("(\\[?\\{\\'name\\'\\:\\s\\')|(\\'\\,\\s{1}\\'id\\'\\:\\s{1}\\d+\\}\\]?)","", movies$production_companies)  # Remove [ and ] characters
+
+
+movies$production_companies[is.na(movies$production_companies)] <- "no production companies info"
+
+movies$production_companies[5]
+```
+
+```{r}
+# extract the first production country
+movies$production_countries <- gsub("(\\[?\\{\\'iso\\_3166\\_1\\'\\:\\s{1}\\')|(\\'\\,\\s{1}\\'name.*\\}\\]?)", "",movies$production_countries)
+
+movies$production_countries[is.na(movies$production_countries)] <- "no country info"
+
+#if production company is US keep it as it is and if not replace it with Foreign
+movies$production_countries <- ifelse(movies$production_countries == "US", "US", "Foreign")
+movies$production_countries[110]
+
+```
+
+```{r}
+str(movies)
+```
+
+Remove the genre column
+
+```{r}
+movies <- subset(movies, select = -c(genres, spoken_languages))
+```
+
+```{r}
+movies$popularity <- as.numeric(movies$popularity)
+str(movies$popularity)
+```
+
+For this data we only need the year from the release_date
+
+```{r}
+# Convert release date to proper date format
+movies$release_date <- as.Date(movies$release_date, format = "%m/%d/%Y")
+
+#Extract only year from the date
+movies$release_year <- as.integer(format(movies$release_date, "%Y"))
+
+# Remove the release_date column
+movies <- subset(movies, select = -c(release_date))
+```
+
+```{r}
+str(movies)
+```
+
+Now lets see some association of target variable revenue With categorical and numerical variables.
+
+```{r}
+colSums(is.na(movies))
+```
+
+```{r}
+# Create a frequency table
+freq_table <- table(movies$release_year)
+
+# Find the most occurring value
+mode_year <- names(freq_table)[which.max(freq_table)]
+```
+
+```{r}
+movies$budget[is.na(movies$budget)] <- 0
+movies$tagline[is.na(movies$tagline)] <- "No Tagline"
+movies$revenue[is.na(movies$revenue)] <- 0
+movies$vote_average[is.na(movies$vote_average)] <- mean(movies$vote_average, na.rm = T)
+movies$vote_count[is.na(movies$vote_count)] <- mean(movies$vote_count, na.rm = T)
+movies$runtime[is.na(movies$runtime)] <- mean(movies$runtime, na.rm = T)
+movies$release_year[is.na(movies$release_year)] <- mode_year
+```
+
+```{r}
+movies <-  na.omit(movies)
+```
+
+```{r}
+dim(movies)
+```
+
+```{r}
+# Make a list of continous variables
+cont_vars <- c("budget","popularity", "runtime", "vote_average", "vote_count", "revenue")
+```
+
+```{r}
+# Create a correlation matrix
+cor_mat <- cor(movies[, cont_vars])
+
+# Create a correlation plot
+corrplot(cor_mat, type = "upper", order = "hclust", tl.col = "black")
+
+```
+ 
+```{r}
+# Create scatter plots
+for (var in cont_vars) {
+  p <- ggplot(data = movies, aes(x = .data[[var]], y = revenue)) +
+    geom_point() +
+    ggtitle(paste("Scatter plot of", var, "and revenue")) +
+    xlab(var) +
+    ylab("Revenue")
+  
+  print(p)
+}
+```
+
+The vote_count, budget, and popularity has the most impact on the revenue of a movie.
+
+```{r}
+str(movies)
+```
+
+```{r}
+# list the name of categorical variables
+categorical_var <- c("adult", "production_countries", "status", "video", "release_year")
+```
+
+```{r}
+# Create a for loop to plot boxplots for each categorical variable
+for (var in categorical_var) {
+  boxplot(revenue ~ movies[[var]],
+          data = movies,
+          main = paste("Boxplot of Revenue by", var),
+          xlab = var,
+          ylab = "Revenue")
+}
+```
+
+```{r}
+# Create a for loop to plot bar plots for each categorical variable
+for (var in categorical_var) {
+  # Get the counts of each category
+  count_table <- table(movies[[var]])
+  # Create the bar plot
+  barplot(count_table,
+          main = paste("Barplot of Counts by", var),
+          xlab = var,
+          ylab = "Count")
+}
+```
+
+```{r}
+movies <- subset(movies, select = -c(id, imdb_id, original_title, production_companies, original_title, original_language, vote_average, overview, status))
+```
+
+```{r}
+dim(movies)
+```
+
+Add a single column for title and tagline
+
+```{r}
+movies$new_title <- paste0(movies$title, " - ", movies$tagline)
+movies$title <- NULL
+movies$tagline <- NULL
+```
+
+```{r}
+str(movies)
+```
+
+```{r}
+ggplot(movies, aes(x = (revenue))) + 
+  geom_histogram( fill = "lightblue", color = "black") + 
+  labs(title = "Distribution of Revenue", x = "Revenue", y = "Frequency")
+```
+
+The target variable revenue is very highly skewed to the right. There we are going to apply square root transformation
+
+```{r}
+movies$revenue <- sqrt(movies$revenue)
+```
+
+```{r}
+ggplot(movies, aes(x = (revenue))) + 
+  geom_histogram( fill = "lightblue", color = "black", bins = 30) + 
+  labs(title = "Distribution of Revenue", x = "Revenue", y = "Frequency")
+```
+
+```{r}
+movies$release_year <- as.integer(movies$release_year)
+```
+
+Now it looks good comparatively to the previous one.
+
+## Create document term matrix
+
+```{r}
+#Remove stop words and do stemming of the new_title
+movies$new_title <- rm_stopwords(movies$new_title, stopwords = tm::stopwords("english"), separate = FALSE, strip = TRUE)
+movies$new_title <- stemmer(movies$new_title, warn = FALSE)
+```
+
+First split the data into train and test splits
+
+```{r}
+inTrain <- createDataPartition(movies$revenue, p = 0.8, list = F)
+train_data <- movies[inTrain, ]
+test_data <- movies[-inTrain, ]
+```
+
+```{r}
+# Define the text vectorization layer with desired parameters
+text_vectorizer <- layer_text_vectorization(output_mode = "tf_idf", ngrams = 2, max_tokens = 100)
+
+text_vectorizer %>% adapt(train_data$new_title)
+
+# Create document term matrix for training, validation and testing data.
+title_train_dtm= text_vectorizer(train_data$new_title)
+title_test_dtm= text_vectorizer(test_data$new_title)
+```
+
+```{r}
+
+title_train_dtm <- as.matrix(title_train_dtm)
+title_test_dtm <- as.matrix(title_test_dtm)
+```
+
+```{r}
+train_data <- cbind(train_data, title_train_dtm)
+test_data <- cbind(test_data, title_test_dtm)
+```
+
+```{r}
+dim(train_data)
+dim(test_data)
+```
+
+```{r}
+# Find character variables
+char_vars <- names(train_data)[sapply(train_data, is.character)]
+
+# Convert character variables to factors
+train_data[char_vars] <- lapply(train_data[char_vars], as.factor)
+test_data[char_vars] <- lapply(test_data[char_vars], as.factor)
+```
+
+```{r}
+#Remove the overview and newtitle from the train and test data
+train_data$overview <- NULL
+train_data$new_title <- NULL
+
+test_data$overview <- NULL
+test_data$new_title <- NULL
+```
+
+```{r}
+dim(train_data)
+dim(test_data)
+```
+
+```{r}
+str(train_data)
+```
+
+We are all set to train and evaluate the machine learning model
+
+```{r}
+colSums(is.na(train_data))
+```
+
+## Train and Evaluate Machine Learning Model
+
+### 1- Lasso Model
+
+```{r}
+set.seed(1)
+
+lasso <- caret::train(revenue ~ ., 
+                     data = train_data, 
+                     method = "glmnet", 
+                     trControl = trainControl(method = "cv", number = 10), 
+                     tuneGrid = expand.grid(alpha = 1, lambda = seq(0.0001, 1, length = 100)),
+                     preProc = c("knnImpute", "nzv", "center", "scale"), 
+                     na.action = na.pass)
+
+# Print the trained model
+print(lasso)
+```
+
+```{r}
+test_preds <- predict(lasso, newdata = test_data, na.action = na.pass)
+
+
+rmse_lasso <- RMSE(test_preds, test_data$revenue)
+cat("Lasso RMSE: ", rmse_lasso)
+```
+
+### 2- Ridge Model
+
+```{r}
+set.seed(1)
+
+# define the train control
+tc <- trainControl(method = "cv", 
+                   number = 10, 
+                   savePredictions = "final", 
+                   verboseIter = TRUE)
+
+# train a ridge model with cross validation
+ridge <- caret::train(revenue ~ ., 
+                     data = train_data, 
+                     method = "glmnet", 
+                     preProc = c("knnImpute", "nzv"),
+                     trControl = tc, 
+                     tuneGrid = expand.grid(alpha = 0, lambda = seq(0.1, 1, 0.05)),
+                     na.action = na.pass)
+
+
+```
+
+```{r}
+# make predictions on the test data
+test_preds <- predict(ridge, newdata = test_data, na.action = na.pass)
+
+rmse_ridge <- RMSE(test_preds, test_data$revenue)
+cat("Lasso RMSE: ", rmse_lasso)
+```
+
+### 3- Elastic Net Model
+
+```{r}
+set.seed(1)
+# Set up grid of values for lambda and alpha
+grid <- expand.grid(alpha = seq(0, 1, by = 0.1), lambda = seq(0.0001, 0.1, length = 100))
+# Train the model using caret and glmnet
+en <- caret::train(revenue ~ ., 
+                    data = train_data,
+                    method = "glmnet",
+                    preProc = c("knnImpute", "nzv"),
+                    trControl = tc, 
+                    tuneGrid = grid, 
+                    na.action = na.pass,
+                    standardize = TRUE)
+
+
+```
+
+```{r}
+# Get predictions on the test set
+en_pred <- predict(en, newdata = test_data, na.action = na.pass)
+rmse_enet <- RMSE(en_pred, test_data$revenue)
+cat("Elastic Net RMSE: ", rmse_enet)
+```
+
+### 4- Random Forest Model
+
+```{r}
+set.seed(1)
+rf_model <- caret::train(revenue ~ ., 
+                  data = train_data, 
+                  method = "rf", 
+                  trControl = tc, 
+                  preProcess = c("knnImpute", "nzv"), 
+                  importance = TRUE)
+
+
+```
+
+```{r}
+rf_preds <- predict(rf_model, newdata = test_data, na.action = na.pass)
+
+rmse_rf <- RMSE(rf_preds, test_data$revenue)
+cat("Random Forest RMSE: ",rmse_rf)
+```
+
+```{r}
+# get variable importance
+varImp(rf_model, scale = FALSE)
+```
+
+### 5- Gradient Boost Model
+
+```{r}
+set.seed(1)
+
+# train the GBM model using caret
+gbm_model <- caret::train(
+  revenue ~ .,
+  data = train_data,
+  method = "gbm",
+  trControl = tc,
+  preProcess = c("knnImpute", "nzv")
+  )
+```
+
+```{r}
+# make predictions on the test data
+gbm_preds <- predict(gbm_model, newdata = test_data)
+
+rmse_gbm <- RMSE(gbm_preds, test_data$revenue)
+cat("GBM RMSE: ",rmse_gbm)
+```
+
+### 6- SVM Linear Model
+
+```{r}
+set.seed(1)
+# Train SVM model with knn imputation and scaling
+svmL_model <- caret::train(revenue ~ ., 
+                   data = train_data, 
+                   method = "svmLinear", 
+                   preProcess = c("knnImpute", "center", "scale", "nzv"), 
+                   trControl = tc, 
+                   tuneLength = 5
+                   )
+```
+
+```{r}
+# Use the model to make predictions on the test data
+svmL_predictions <- predict(svmL_model, newdata = test_data)
+
+rmse_svmL <- RMSE(svmL_predictions, test_data$revenue)
+cat("Linear SVM RMSE: ",rmse_svmL)
+```
+
+### 7- SVM Radial Model
+
+```{r}
+set.seed(1)
+# Train SVM model with knn imputation and scaling
+svmR_model <- caret::train(revenue ~ ., 
+                   data = train_data, 
+                   method = "svmRadial", 
+                   preProcess = c("knnImpute",  "nzv"), 
+                   trControl = tc, 
+                   tuneLength = 5
+                   )
+```
+
+```{r}
+# Use the model to make predictions on the test data
+svmR_predictions <- predict(svmR_model, newdata = test_data)
+
+rmse_svmR <- RMSE(svmR_predictions, test_data$revenue)
+cat("Linear SVM RMSE: ",rmse_svmR)
+```
+
+Check the RMSE performance
+
+```{r}
+model_list <- list(Lasso= lasso, Ridge = ridge, ElasticNet = en, RandomForest = rf_model, GradientBoost = gbm_model, SVMLinear = svmL_model, SVMRadial = svmR_model)
+
+performance <-  resamples(model_list)
+summary(performance)
+```
+
+## Creating Neural Network Model
+
+```{r}
+# Encode categorical variables manually
+train_data$adult <- ifelse(train_data$adult == "FALSE", 0, 1)
+train_data$production_countries <- ifelse(train_data$production_countries == "US", 1, 2)
+train_data$video <- ifelse(train_data$video == "FALSE", 0, 1)
+
+test_data$adult <- ifelse(test_data$adult == "FALSE", 0, 1)
+test_data$production_countries <- ifelse(test_data$production_countries == "US", 1, 2)
+test_data$video <- ifelse(test_data$video == "FALSE", 0, 1)
+```
+
+```{r}
+str(train_data)
+```
+
+```{r}
+train_idx <- createDataPartition(train_data$revenue, p = 0.9, list = F)
+train <- train_data[train_idx, ]
+valid <- train_data[-train_idx, ]
+test <- test_data
+```
+
+```{r}
+nzv <- nearZeroVar(train)
+train_data <- train[, -nzv]
+test_data <- test[, -nzv]
+valid_data <- valid[, -nzv]
+```
+
+```{r}
+train_X <- subset(train_data, select = -c(revenue))
+train_y <- train_data$revenue
+
+test_X <- subset(test_data, select = -c(revenue))
+test_y <- test_data$revenue
+
+valid_X <- subset(valid_data, select = -c(revenue))
+valid_y <- valid_data$revenue
+```
+
+```{r}
+
+model <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu",
+              input_shape = dim(train_X)[2]) %>%
+  layer_dropout(0.3) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dropout(0.4) %>%
+  layer_dense(units = 1)
+
+opt= optimizer_adam(learning_rate=0.001)
+model %>% compile(
+  loss = "mse",
+  optimizer = opt,
+  metrics = "mse")
+
+summary(model)
+```
+
+```{r}
+history <- model %>% fit(as.matrix(train_X),
+                         train_y,
+                         batch_size=32,
+                         epochs = 50,
+                         validation_data=list(as.matrix(valid_X), valid_y)
+)
+```
+
+Tune hyperparameter.
+
+```{r}
+FLAGS= flags(
+  flag_numeric("learning_rate", 0.01),
+  flag_numeric("units1", 256),
+  flag_numeric('units2', 128),
+  flag_numeric("batch_size", 32),
+  flag_numeric("epochs", 20)
+)
+```
+
+```{r}
+runs <- tuning_run("script.R",
+                   flags = list(
+                     learning_rate = c(0.01, 0.001, 0.0001),
+                     units1 = c(32, 64, 126),
+                     units1 = c(32,  64, 126),
+                     batch_size = c(16, 32, 64),
+                     epochs = c(30, 50, 100, 150)
+                   ),
+                   sample = 0.1
+                   )
+```
+
+```{r}
+runs <- runs[order(runs$metric_val_loss),]
+runs
+```
+
+```{r}
+view_run(runs$run_dir[1])
+```
+
+Note the best values fo parameters returned by the above code and update the best model
+
+```{r}
+training_X = rbind(train_X, valid_X)
+training_y = c(train_y, valid_y)
+```
+
+```{r}
+best_mode <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu",
+              input_shape = dim(training_X)[2]) %>%
+  layer_dropout(0.3) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dropout(0.4) %>%
+  layer_dense(units = 1)
+
+opt= optimizer_adam(learning_rate=0.001)
+best_mode %>% compile(
+  loss = "mse",
+  optimizer = opt,
+  metrics = "mse")
+
+summary(model)
+```
+
+```{r}
+history <- best_model %>% fit(as.matrix(training_X),
+                         training_y,
+                         batch_size=32,
+                         epochs = 50
+                         )
+```
+
+```{r}
+# 25 Predict the sale price for the test data:
+test_preds <- best_model %>% predict(as.matrix(test_X))
+rmse_nn <- RMSE(test_preds, test_y)
+rmse_nn
+```
+
